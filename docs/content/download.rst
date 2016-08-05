@@ -5,7 +5,12 @@ Download
 
 ☛ `Download DrawBot`_ ☚
 
-`Download DrawBot for osX 10.6 - 10.9`_
+requirements: osX 10.9+
+
+Older Downloads
+---------------
+
+`DrawBot for osX 10.6 - 10.9`_ (version 3.45)
 
 License
 -------
@@ -14,4 +19,4 @@ License
 
 .. _Download DrawBot: http://static.typemytype.com/drawBot/DrawBot.dmg
 
-.. _Download DrawBot for osX 10.6 - 10.9: http://static.typemytype.com/drawBot/DrawBot3.45.dmg
+.. _DrawBot for osX 10.6 - 10.9: http://static.typemytype.com/drawBot/DrawBot3.45.dmg

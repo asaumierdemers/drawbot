@@ -1,20 +1,17 @@
 import AppKit
 import Quartz
 
-import os
 import tempfile
-import subprocess
 
 from imageContext import ImageContext
 
-gifsiclePath = os.path.join(os.path.dirname(__file__), "tools", "gifsicle")
-if not os.path.exists(gifsiclePath):
-    gifsiclePath = os.path.join(os.getcwd(), "tools", "gifsicle")
+from tools.gifTools import generateGif
+
 
 class GifContext(ImageContext):
 
     _saveImageFileTypes = {
-        "gif" : AppKit.NSGIFFileType,
+        "gif": AppKit.NSGIFFileType,
         }
 
     fileExtensions = _saveImageFileTypes.keys()
@@ -45,35 +42,4 @@ class GifContext(ImageContext):
         inputPaths = super(GifContext, self)._writeDataToFile(data, tempPath, shouldBeAnimated)
 
         if shouldBeAnimated:
-            cmds = [
-                # gifsicle path
-                gifsiclePath,
-                # optimize level
-                # "-O3",
-                # force to 256 colors
-                "--colors", "256",
-                # make it loop
-                "--loop",
-            ]
-            # add source paths with delay for each frame
-            for i, inputPath in enumerate(inputPaths):
-                cmds += [
-                        # add the frame duration
-                        "--delay", "%i" % self._delayData[i],
-                        # add the input gif for each frame
-                        inputPath
-                    ]
-
-            cmds += [
-                # output path
-                "--output",
-                path
-            ]
-            # make a string of escaped commands
-            cmds = subprocess.list2cmdline(cmds)
-            # go
-            popen = subprocess.Popen(cmds, shell=True)
-            popen.wait()
-            # remove the temp input gifs
-            for inputPath in inputPaths:
-                os.remove(inputPath)
+            generateGif(inputPaths, path, self._delayData)

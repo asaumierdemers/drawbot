@@ -1,4 +1,4 @@
-from AppKit import *
+import AppKit
 from PyObjCTools import AppHelper
 
 import os
@@ -8,6 +8,7 @@ from drawBot.ui.drawBotController import DrawBotController
 from drawBot.ui.preferencesController import PreferencesController
 from drawBot.ui.debug import DebugWindowController
 
+import drawBot.drawBotDrawingTools
 from drawBot.misc import getDefault, stringToInt
 from drawBot.updater import Updater
 
@@ -15,7 +16,8 @@ import objc
 
 objc.setVerbose(True)
 
-class DrawBotDocument(NSDocument):
+
+class DrawBotDocument(AppKit.NSDocument):
 
     def readFromFile_ofType_(self, path, tp):
         return True, None
@@ -61,12 +63,13 @@ class DrawBotDocument(NSDocument):
             return self.vanillaWindowController.pdfData() is not None
         return True
 
-class DrawBotAppDelegate(NSObject):
+
+class DrawBotAppDelegate(AppKit.NSObject):
 
     def init(self):
         self = super(DrawBotAppDelegate, self).init()
         code = stringToInt("GURL")
-        NSAppleEventManager.sharedAppleEventManager().setEventHandler_andSelector_forEventClass_andEventID_(self, "getUrl:withReplyEvent:", code, code)
+        AppKit.NSAppleEventManager.sharedAppleEventManager().setEventHandler_andSelector_forEventClass_andEventID_(self, "getUrl:withReplyEvent:", code, code)
         return self
 
     def applicationDidFinishLaunching_(self, notification):
@@ -75,24 +78,25 @@ class DrawBotAppDelegate(NSObject):
 
     def applicationDidBecomeActive_(self, notification):
         self.sheduleIconTimer()
+        drawBot.drawBotDrawingTools._chachedPixelColorBitmaps.clear()
 
     def applicationShouldOpenUntitledFile_(self, sender):
         return True
 
     def sheduleIconTimer(self):
         if getDefault("DrawBotAnimateIcon", True):
-            self._iconTimer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(0.1, self, "animateApplicationIcon:", None, False)
+            self._iconTimer = AppKit.NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(0.1, self, "animateApplicationIcon:", None, False)
 
     def animateApplicationIcon_(self, timer):
-        if NSApp().isActive():
-            image = NSImage.imageNamed_("icon_%s" % randint(0, 20))
-            NSApp().setApplicationIconImage_(image)
+        if AppKit.NSApp().isActive():
+            image = AppKit.NSImage.imageNamed_("icon_%s" % randint(0, 20))
+            AppKit.NSApp().setApplicationIconImage_(image)
             self.sheduleIconTimer()
 
     def showDocumentation_(self, sender):
         url = "http://www.drawbot.com"
-        ws = NSWorkspace.sharedWorkspace()
-        ws.openURL_(NSURL.URLWithString_(url))
+        ws = AppKit.NSWorkspace.sharedWorkspace()
+        ws.openURL_(AppKit.NSURL.URLWithString_(url))
 
     def showPreferences_(self, sender):
         try:
@@ -104,11 +108,12 @@ class DrawBotAppDelegate(NSObject):
         self._debugger.showHide()
 
     def getUrl_withReplyEvent_(self, event, reply):
-        import urlparse, urllib2
+        import urlparse
+        import urllib2
         code = stringToInt("----")
         url = event.paramDescriptorForKeyword_(code)
         urlString = url.stringValue()
-        documentController = NSDocumentController.sharedDocumentController()
+        documentController = AppKit.NSDocumentController.sharedDocumentController()
 
         data = urlparse.urlparse(urlString)
         if data.netloc:
@@ -139,9 +144,9 @@ class DrawBotAppDelegate(NSObject):
         document.vanillaWindowController.showAskYesNo("Download External Script",
             "You opened '%s' from '%s'.\n\n"
             "Read the code before running it so you know what it will do. If you don't understand it, don't run it.\n\n"
-            "Do you want to open this Script?" % (fileName, data.netloc) ,
+            "Do you want to open this Script?" % (fileName, data.netloc),
             result
             )
 
 if __name__ == "__main__":
-	AppHelper.runEventLoop()
+    AppHelper.runEventLoop()

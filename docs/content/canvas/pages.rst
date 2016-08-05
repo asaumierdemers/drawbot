@@ -5,11 +5,13 @@ Pages
 
 .. autofunction:: drawBot.newPage
 .. autofunction:: drawBot.newDrawing
+.. autofunction:: drawBot.endDrawing
 
 Size
 ----
 
 .. autofunction:: drawBot.size
+.. autofunction:: drawBot.sizes
 
 Page Attributes
 ---------------

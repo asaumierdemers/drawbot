@@ -34,3 +34,9 @@ for contour in path.contours:
     for segment in contour:
         for x, y in segment:
             print x, y
+    print "is open:", contour.open
+
+# translate the path
+path.translate(0, 300)
+# draw the path again
+drawPath(path)

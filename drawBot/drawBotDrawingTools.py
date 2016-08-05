@@ -11,9 +11,10 @@ from context.baseContext import BezierPath, FormattedString
 from context.dummyContext import DummyContext
 
 from context.tools import openType
+from context.tools.imageObject import ImageObject
+from context.tools import gifTools
 
-from misc import DrawBotError, warnings, VariableController, optimizePath
-import drawBotSettings
+from misc import DrawBotError, warnings, VariableController, optimizePath, isPDF, isEPS, isGIF
 
 
 def _getmodulecontents(module, names=None):
@@ -24,8 +25,10 @@ def _getmodulecontents(module, names=None):
         d[name] = getattr(module, name)
     return d
 
+
 def _deprecatedWarningLowercase(txt):
     warnings.warn("lowercase API is deprecated use: '%s'" % txt)
+
 
 def _deprecatedWarningWrapInTuple(txt):
     warnings.warn("deprecated syntax, wrap x and y values in a tuple: '%s'" % txt)
@@ -33,29 +36,30 @@ def _deprecatedWarningWrapInTuple(txt):
 _chachedPixelColorBitmaps = {}
 
 _paperSizes = {
-    'Letter'        : (612, 792),
-    'LetterSmall'   : (612, 792),
-    'Tabloid'       : (792, 1224),
-    'Ledger'        : (1224, 792),
-    'Legal'         : (612, 1008),
-    'Statement'     : (396, 612),
-    'Executive'     : (540, 720),
-    'A0'            : (2384, 3371),
-    'A1'            : (1685, 2384),
-    'A2'            : (1190, 1684),
-    'A3'            : (842, 1190),
-    'A4'            : (595, 842),
-    'A4Small'       : (595, 842),
-    'A5'            : (420, 595),
-    'B4'            : (729, 1032),
-    'B5'            : (516, 729),
-    'Folio'         : (612, 936),
-    'Quarto'        : (610, 780),
-    '10x14'         : (720, 1008),
+    'Letter'      : (612, 792),
+    'LetterSmall' : (612, 792),
+    'Tabloid'     : (792, 1224),
+    'Ledger'      : (1224, 792),
+    'Legal'       : (612, 1008),
+    'Statement'   : (396, 612),
+    'Executive'   : (540, 720),
+    'A0'          : (2384, 3371),
+    'A1'          : (1685, 2384),
+    'A2'          : (1190, 1684),
+    'A3'          : (842, 1190),
+    'A4'          : (595, 842),
+    'A4Small'     : (595, 842),
+    'A5'          : (420, 595),
+    'B4'          : (729, 1032),
+    'B5'          : (516, 729),
+    'Folio'       : (612, 936),
+    'Quarto'      : (610, 780),
+    '10x14'       : (720, 1008),
 }
 
 for key, (w, h) in _paperSizes.items():
     _paperSizes["%sLandscape" % key] = (h, w)
+
 
 class DrawBotDrawingTool(object):
 
@@ -68,7 +72,14 @@ class DrawBotDrawingTool(object):
     __all__ = property(_get__all__)
 
     def _get_version(self):
-        return drawBotSettings.__version__
+        try:
+            import drawBotSettings
+            return drawBotSettings.__version__
+        except:
+            # DrawBot is installed as a module
+            import pkg_resources
+            return pkg_resources.require("drawBot")[0].version
+        return ""
 
     __version__ = property(_get_version)
 
@@ -78,22 +89,45 @@ class DrawBotDrawingTool(object):
         namespace.update(_getmodulecontents(math))
 
     def _addInstruction(self, callback, *args, **kwargs):
+        if self._requiresNewFirstPage and not self._hasPage:
+            self._hasPage = True
+            self._instructionsStack.append(("newPage", [self.width(), self.height()], {}))
         self._instructionsStack.append((callback, args, kwargs))
 
     def _drawInContext(self, context):
         if not self._instructionsStack:
             return
-        if self._instructionsStack[0][0] != "newPage":
-            self._instructionsStack.insert(0, ("newPage", [self.width(), self.height()], {}))
         for callback, args, kwargs in self._instructionsStack:
             attr = getattr(context, callback)
             attr(*args, **kwargs)
 
-    def _reset(self):
-        self._instructionsStack = []
-        self._dummyContext = DummyContext()
-        self._width = None
-        self._height = None
+    def _reset(self, other=None):
+        if other is not None:
+            self._instructionsStack = list(other._instructionsStack)
+            self._dummyContext = other._dummyContext
+            self._width = other._width
+            self._height = other._height
+            self._tempInstalledFonts = dict(other._tempInstalledFonts)
+            self._requiresNewFirstPage = other._requiresNewFirstPage
+            self._hasPage = other._hasPage
+        else:
+            self._instructionsStack = []
+            self._dummyContext = DummyContext()
+            self._width = None
+            self._height = None
+            self._requiresNewFirstPage = False
+            self._hasPage = False
+            if not hasattr(self, "_tempInstalledFonts"):
+                self._tempInstalledFonts = dict()
+
+    def _copy(self):
+        new = self.__class__()
+        new._instructionsStack = list(self._instructionsStack)
+        new._dummyContext = self._dummyContext
+        new._width = self._width
+        new._height = self._height
+        new._tempInstalledFonts = dict(self._tempInstalledFonts)
+        return new
 
     def newDrawing(self):
         """
@@ -102,8 +136,17 @@ class DrawBotDrawingTool(object):
         .. showcode:: /../examples/newDrawing.py
         """
         self._reset()
+        self.installedFonts()
 
-    ## magic variables
+    def endDrawing(self):
+        """
+        Explicitly tell drawBot the drawing is done.
+        This is advised when using drawBot as a standalone module.
+        """
+        self._uninstallAllFonts()
+        gifTools.clearExplodedGifCache()
+
+    # magic variables
 
     def width(self):
         """
@@ -133,13 +176,21 @@ class DrawBotDrawingTool(object):
 
     HEIGHT = property(_get_height)
 
+    def sizes(self, paperSize=None):
+        """
+        Returns the width and height of a specified canvas size.
+        If no canvas size is given it will return the dictionary containing all possible page sizes.
+        """
+        _paperSizes["screen"] = tuple(AppKit.NSScreen.mainScreen().frame().size)
+        if paperSize:
+            return _paperSizes[paperSize]
+        return _paperSizes
+
     def pageCount(self):
         """
         Returns the current page count.
         """
-        pageCount = 1
-        if self._instructionsStack and self._instructionsStack[0][0] == "newPage":
-            pageCount = 0
+        pageCount = 0
         for i in self._instructionsStack:
             if i[0] == "newPage":
                 pageCount += 1
@@ -153,7 +204,9 @@ class DrawBotDrawingTool(object):
 
     _magicVariables = ["WIDTH", "HEIGHT", "PAGECOUNT"]
 
-    ## public callbacks
+    # ====================
+    # = public callbacks =
+    # ====================
 
     # size and pages
 
@@ -162,12 +215,12 @@ class DrawBotDrawingTool(object):
         Set the width and height of the canvas.
         Without calling `size()` the default drawing board is 1000 by 1000 points.
 
-        Alternatively `size('A4')` can be used.
+        Alternatively `size('A4')` with a supported papersizes or `size('screen')` setting the current screen size as size, can be used.
 
         Afterwards the functions `width()` and `height()` can be used for calculations.
 
         It is advised to use `size()` always at the top of the script and not use `size()`
-        in a multiple page document as a `newPage(w, h)` set the correct dimentions directly.
+        in a multiple page document use `newPage(w, h)` to set the correct dimentions directly.
 
         .. showcode:: /../examples/size.py
 
@@ -175,6 +228,8 @@ class DrawBotDrawingTool(object):
         """
         if width in _paperSizes:
             width, height = _paperSizes[width]
+        if width == "screen":
+            width, height = AppKit.NSScreen.mainScreen().frame().size
         if height is None:
             width, height = width
         self._width = width
@@ -182,7 +237,7 @@ class DrawBotDrawingTool(object):
         if not self._instructionsStack:
             self.newPage(width, height)
         else:
-            self._addInstruction("size", width, height)
+            raise DrawBotError("It is advised to use 'size()' at the top of a script.")
 
     def newPage(self, width=None, height=None):
         """
@@ -192,7 +247,7 @@ class DrawBotDrawingTool(object):
         Optionally a `width` and `height` argument can be provided to set the size.
         If not provided the default size will be used.
 
-        Alternatively `size('A4')` can be used.
+        Alternatively `size('A4')` with a supported papersizes or `size('screen')` setting the current screen size as size, can be used.
 
         .. showcode:: /../examples/newPage.py
 
@@ -200,8 +255,11 @@ class DrawBotDrawingTool(object):
         """
         if width in _paperSizes:
             width, height = _paperSizes[width]
+        if width == "screen":
+            width, height = AppKit.NSScreen.mainScreen().frame().size
         self._width = width
         self._height = height
+        self._hasPage = True
         self._addInstruction("newPage", width, height)
 
     def newpage(self, width=None, height=None):
@@ -226,14 +284,18 @@ class DrawBotDrawingTool(object):
         """
         if isinstance(paths, (str, unicode)):
             paths = [paths]
-        for path in paths:
-            path = optimizePath(path)
+        for rawPath in paths:
+            path = optimizePath(rawPath)
             dirName = os.path.dirname(path)
             if not os.path.exists(dirName):
-                raise DrawBotError, "Folder '%s' doesn't exists" % dirName
+                raise DrawBotError("Folder '%s' doesn't exists" % dirName)
             base, ext = os.path.splitext(path)
             ext = ext.lower()[1:]
+            if not ext:
+                ext = rawPath
             context = getContextForFileExt(ext)
+            if context is None:
+                raise DrawBotError("Did not found a supported context for: '%s'" % ext)
             self._drawInContext(context)
             context.saveImage(path, multipage)
 
@@ -273,6 +335,8 @@ class DrawBotDrawingTool(object):
         This will save the state of the canvas (with all the transformations)
         but also the state of the colors, strokes...
         """
+        self._dummyContext.save()
+        self._requiresNewFirstPage = True
         self._addInstruction("save")
 
     def restore(self):
@@ -281,6 +345,8 @@ class DrawBotDrawingTool(object):
         This will restore the state of the canvas (with all the transformations)
         but also the state of colors, strokes...
         """
+        self._dummyContext.restore()
+        self._requiresNewFirstPage = True
         self._addInstruction("restore")
 
     # basic shapes
@@ -291,6 +357,7 @@ class DrawBotDrawingTool(object):
 
         .. showcode:: /../examples/rect.py
         """
+        self._requiresNewFirstPage = True
         self._addInstruction("rect", x, y, w, h)
 
     def oval(self, x, y, w, h):
@@ -299,6 +366,7 @@ class DrawBotDrawingTool(object):
 
         .. showcode:: /../examples/oval.py
         """
+        self._requiresNewFirstPage = True
         self._addInstruction("oval", x, y, w, h)
 
     # path
@@ -307,6 +375,7 @@ class DrawBotDrawingTool(object):
         """
         Create a new path.
         """
+        self._requiresNewFirstPage = True
         self._addInstruction("newPath")
 
     def newpath(self):
@@ -317,6 +386,7 @@ class DrawBotDrawingTool(object):
         """
         Move to a point `x`, `y`.
         """
+        self._requiresNewFirstPage = True
         self._addInstruction("moveTo", (x, y))
 
     def moveto(self, x, y):
@@ -327,6 +397,7 @@ class DrawBotDrawingTool(object):
         """
         Line to a point `x`, `y`.
         """
+        self._requiresNewFirstPage = True
         self._addInstruction("lineTo", (x, y))
 
     def lineto(self, x, y):
@@ -338,22 +409,32 @@ class DrawBotDrawingTool(object):
         Curve to a point `x3`, `y3`.
         With given bezier handles `x1`, `y1` and `x2`, `y2`.
         """
+        self._requiresNewFirstPage = True
         self._addInstruction("curveTo", (x1, y1), (x2, y2), (x3, y3))
 
     def curveto(self, x1, y1, x2, y2, x3, y3):
         _deprecatedWarningLowercase("curveTo((%s, %s), (%s, %s), (%s, %s))" % (x1, y1, x2, y2, x3, y3))
         self.curveTo((x1, y1), (x2, y2), (x3, y3))
 
+    def arc(self, center, radius, startAngle, endAngle, clockwise):
+        """
+        Arc with `center` and a given `radius`, from `startAngle` to `endAngle`, going clockwise if `clockwise` is True and counter clockwise if `clockwise` is False.
+        """
+        self._requiresNewFirstPage = True
+        self._addInstruction("arc", center, radius, startAngle, endAngle, clockwise)
+
     def arcTo(self, (x1, y1), (x2, y2), radius):
         """
         Arc from one point to an other point with a given `radius`.
         """
+        self._requiresNewFirstPage = True
         self._addInstruction("arcTo", (x1, y1), (x2, y2), radius)
 
     def closePath(self):
         """
         Close the path.
         """
+        self._requiresNewFirstPage = True
         self._addInstruction("closePath")
 
     def closepath(self):
@@ -366,6 +447,9 @@ class DrawBotDrawingTool(object):
         """
         if isinstance(path, AppKit.NSBezierPath):
             path = self._bezierPathClass(path)
+        if isinstance(path, self._bezierPathClass):
+            path = path.copy()
+        self._requiresNewFirstPage = True
         self._addInstruction("drawPath", path)
 
     def drawpath(self, path=None):
@@ -380,6 +464,7 @@ class DrawBotDrawingTool(object):
         Use the current path as a clipping path.
         The clipping path will be used until the canvas gets a `restore()`.
         """
+        self._requiresNewFirstPage = True
         self._addInstruction("clipPath", path)
 
     def clippath(self, path=None):
@@ -409,28 +494,66 @@ class DrawBotDrawingTool(object):
 
         .. showcode:: /../examples/polygon.py
         """
-        if isinstance(x, tuple) and isinstance(y, tuple):
+        try:
+            a, b = x
+        except TypeError:
+            args = [args[i:i+2] for i in range(0, len(args), 2)]
+            _deprecatedWarningWrapInTuple("polygon((%s, %s), %s)" % (x, y, ", ".join([str(i) for i in args])))
+        else:
             args = list(args)
             args.insert(0, y)
             x, y = x
-        else:
-            args = [args[i:i+2] for i in range(0, len(args), 2)]
-            _deprecatedWarningWrapInTuple("polygon((%s, %s), %s)" % (x, y, ", ".join([str(i) for i in args])))
         if not args:
-            raise DrawBotError, "polygon() expects more than a single point"
+            raise DrawBotError("polygon() expects more than a single point")
         doClose = kwargs.get("close", True)
         if len(kwargs) > 1:
-            raise DrawBotError, "unexpected keyword argument for this function"
+            raise DrawBotError("unexpected keyword argument for this function")
 
         path = self._bezierPathClass()
         path.moveTo((x, y))
-        for p in args:
-            path.lineTo(p)
+        for x, y in args:
+            path.lineTo((x, y))
         if doClose:
             path.closePath()
         self.drawPath(path)
 
     # color
+
+    def colorSpace(self, colorSpace):
+        """
+        Set the color space.
+        Options are `genericRGB`, `adobeRGB1998`, `sRGB`, `genericGray`, `genericGamma22Gray`.
+        The default is `genericRGB`.
+        `None` will reset it back to the default.
+
+        .. showCode:: /../examples/colorSpace.py
+        """
+        self._requiresNewFirstPage = True
+        self._addInstruction("colorSpace", colorSpace)
+
+    def listColorSpaces(self):
+        """
+        Return a list of all available color spaces.
+        """
+        return self._dummyContext._colorSpaceMap.keys()
+
+    def blendMode(self, operation):
+        """
+        Set a blend mode.
+
+        Available operations are: `normal`, `multiply`, `screen`, `overlay`,
+        `darken`, `lighten`, `colorDodge`, `colorBurn`, `softLight`,
+        `hardLight`, `difference`, `exclusion`, `hue`, `saturation`,
+        `color`, `luminosity`, `clear`, `copy`, `sourceIn`, `sourceOut`,
+        `sourceAtop`, `destinationOver`, `destinationIn`, `destinationOut`,
+        `destinationAtop`, `xOR`, `plusDarker` and `plusLighter`,
+
+        .. showcode:: /../examples/blendMode.py
+        """
+        if operation not in self._dummyContext._blendModeMap.keys():
+            raise DrawBotError("blend mode must be %s" % (", ".join(self._dummyContext._blendModeMap.keys())))
+        self._requiresNewFirstPage = True
+        self._addInstruction("blendMode", operation)
 
     def fill(self, r=None, g=None, b=None, alpha=1):
         """
@@ -439,6 +562,7 @@ class DrawBotDrawingTool(object):
 
         .. showcode:: /../examples/fill.py
         """
+        self._requiresNewFirstPage = True
         self._addInstruction("fill", r, g, b, alpha)
 
     def stroke(self, r=None, g=None, b=None, alpha=1):
@@ -448,6 +572,7 @@ class DrawBotDrawingTool(object):
 
         .. showcode:: /../examples/stroke.py
         """
+        self._requiresNewFirstPage = True
         self._addInstruction("stroke", r, g, b, alpha)
 
     def cmykFill(self, c, m=None, y=None, k=None, alpha=1):
@@ -458,6 +583,7 @@ class DrawBotDrawingTool(object):
 
         .. showcode:: /../examples/cmykFill.py
         """
+        self._requiresNewFirstPage = True
         self._addInstruction("cmykFill", c, m, y, k, alpha)
 
     def cmykfill(self, c,  m=None, y=None, k=None, alpha=1):
@@ -472,6 +598,7 @@ class DrawBotDrawingTool(object):
 
         .. showcode:: /../examples/cmykStroke.py
         """
+        self._requiresNewFirstPage = True
         self._addInstruction("cmykStroke", c, m, y, k, alpha)
 
     def cmykstroke(self, c,  m=None, y=None, k=None, alpha=1):
@@ -482,6 +609,8 @@ class DrawBotDrawingTool(object):
         """
         Adds a shadow with an `offset` (x, y), `blur` and a `color`.
         The `color` argument must be a tuple similarly as `fill`.
+        The `offset`and `blur` argument will be drawn indepeneded of the current
+        context transformations.
 
         .. showcode:: /../examples/shadow.py
         """
@@ -489,6 +618,7 @@ class DrawBotDrawingTool(object):
             color = (0, 0, 0)
         if blur is None:
             blur = 10
+        self._requiresNewFirstPage = True
         self._addInstruction("shadow", offset, blur, color)
 
     def cmykShadow(self, offset, blur=None, color=None):
@@ -502,6 +632,7 @@ class DrawBotDrawingTool(object):
             color = (0, 0, 0, 1, 1)
         if blur is None:
             blur = 10
+        self._requiresNewFirstPage = True
         self._addInstruction("cmykShadow", offset, blur, color)
 
     def cmykshadow(self, offset, blur=None, color=None):
@@ -521,6 +652,7 @@ class DrawBotDrawingTool(object):
 
         .. showcode:: /../examples/linearGradient.py
         """
+        self._requiresNewFirstPage = True
         self._addInstruction("linearGradient", startPoint, endPoint, colors, locations)
 
     def lineargradient(self, startPoint=None, endPoint=None, colors=None, locations=None):
@@ -540,6 +672,7 @@ class DrawBotDrawingTool(object):
 
         .. showcode:: /../examples/cmykLinearGradient.py
         """
+        self._requiresNewFirstPage = True
         self._addInstruction("cmykLinearGradient", startPoint, endPoint, colors, locations)
 
     def cmyklinearGradient(self, startPoint=None, endPoint=None, colors=None, locations=None):
@@ -561,6 +694,7 @@ class DrawBotDrawingTool(object):
 
         .. showcode:: /../examples/radialGradient.py
         """
+        self._requiresNewFirstPage = True
         self._addInstruction("radialGradient", startPoint, endPoint, colors, locations, startRadius, endRadius)
 
     def radialgradient(self, startPoint=None, endPoint=None, colors=None, locations=None, startRadius=0, endRadius=100):
@@ -582,6 +716,7 @@ class DrawBotDrawingTool(object):
 
         .. showcode:: /../examples/cmykRadialGradient.py
         """
+        self._requiresNewFirstPage = True
         self._addInstruction("cmykRadialGradient", startPoint, endPoint, colors, locations, startRadius, endRadius)
 
     def cmykradialgradient(self, startPoint=None, endPoint=None, colors=None, locations=None, startRadius=0, endRadius=100):
@@ -596,6 +731,7 @@ class DrawBotDrawingTool(object):
 
         .. showcode:: /../examples/strokeWidth.py
         """
+        self._requiresNewFirstPage = True
         self._addInstruction("strokeWidth", value)
 
     def strokewidth(self, value):
@@ -608,6 +744,7 @@ class DrawBotDrawingTool(object):
 
         .. showcode:: /../examples/miterLimit.py
         """
+        self._requiresNewFirstPage = True
         self._addInstruction("miterLimit", value)
 
     def miterlimit(self, value):
@@ -622,6 +759,7 @@ class DrawBotDrawingTool(object):
 
         .. showcode:: /../examples/lineJoin.py
         """
+        self._requiresNewFirstPage = True
         self._addInstruction("lineJoin", value)
 
     def linejoin(self, value):
@@ -636,6 +774,7 @@ class DrawBotDrawingTool(object):
 
         .. showcode:: /../examples/lineCap.py
         """
+        self._requiresNewFirstPage = True
         self._addInstruction("lineCap", value)
 
     def linecap(self, value):
@@ -650,9 +789,10 @@ class DrawBotDrawingTool(object):
         .. showcode:: /../examples/lineDash.py
         """
         if not value:
-            raise DrawBotError, "lineDash must be a list of dashes or None"
+            raise DrawBotError("lineDash must be a list of dashes or None")
         if isinstance(value[0], (list, tuple)):
             value = value[0]
+        self._requiresNewFirstPage = True
         self._addInstruction("lineDash", value)
 
     def linedash(self, *value):
@@ -665,13 +805,13 @@ class DrawBotDrawingTool(object):
         """
         Transform the canvas with a transformation matrix.
         """
+        self._requiresNewFirstPage = True
         self._addInstruction("transform", matrix)
 
     def translate(self, x=0, y=0):
         """
         Translate the canvas with a given offset.
         """
-
         self.transform((1, 0, 0, 1, x, y))
 
     def rotate(self, angle):
@@ -708,6 +848,7 @@ class DrawBotDrawingTool(object):
     def font(self, fontName, fontSize=None):
         """
         Set a font with the name of the font.
+        If a font path is given the font will be installed and used directly.
         Optionally a `fontSize` can be set directly.
         The default font, also used as fallback font, is 'LucidaGrande'.
         The default `fontSize` is 10pt.
@@ -718,6 +859,7 @@ class DrawBotDrawingTool(object):
 
             font("Times-Italic")
         """
+        fontName = self._tryInstallFontFromFontName(fontName)
         fontName = fontName.encode("ascii", "ignore")
         self._dummyContext.font(fontName, fontSize)
         self._addInstruction("font", fontName, fontSize)
@@ -733,7 +875,7 @@ class DrawBotDrawingTool(object):
         fontName = fontName.encode("ascii", "ignore")
         dummyFont = AppKit.NSFont.fontWithName_size_(fontName, 10)
         if dummyFont is None:
-            raise DrawBotError, "Fallback font '%s' is not available" % fontName
+            raise DrawBotError("Fallback font '%s' is not available" % fontName)
         self._dummyContext.fallbackFont(fontName)
         self._addInstruction("fallbackFont", fontName)
 
@@ -775,6 +917,13 @@ class DrawBotDrawingTool(object):
         self._dummyContext.tracking(value)
         self._addInstruction("tracking", value)
 
+    def baselineShift(self, value):
+        """
+        Set the shift of the baseline.
+        """
+        self._dummyContext.baselineShift(value)
+        self._addInstruction("baselineShift", value)
+
     def hyphenation(self, value):
         """
         Set hyphenation, `True` or `False`.
@@ -783,6 +932,21 @@ class DrawBotDrawingTool(object):
         """
         self._dummyContext.hyphenation(value)
         self._addInstruction("hyphenation", value)
+
+    def tabs(self, *tabs):
+        """
+        Set tabs, tuples of (`float`, `alignment`)
+        Aligment can be `"left"`, `"center"`, `"right"` or any other character.
+        If a character is provided the alignment will be `right` and centered on the specified character.
+
+        .. showcode:: /../examples/tabs.py
+        """
+        if tabs and tabs[0] is None:
+            self._dummyContext.tabs(None)
+            self._addInstruction("tabs", None)
+            return
+        self._dummyContext.tabs(*tabs)
+        self._addInstruction("tabs", *tabs)
 
     def openTypeFeatures(self, *args, **features):
         """
@@ -803,9 +967,11 @@ class DrawBotDrawingTool(object):
         """
         List all OpenType feature tags for the current font.
 
-        Optionally a `fontName` can be given.
+        Optionally a `fontName` can be given. If a font path is given the font will be installed and used directly.
         """
-        if fontName is None:
+        if fontName:
+            fontName = self._tryInstallFontFromFontName(fontName)
+        else:
             fontName = self._dummyContext._state.text.fontName
         return openType.getFeatureTagsForFontName(fontName)
 
@@ -817,10 +983,15 @@ class DrawBotDrawingTool(object):
 
         .. showcode:: /../examples/text.py
         """
-        if isinstance(x, (tuple, list)):
+        if isinstance(txt, (str, unicode)):
+            try:
+                txt = txt.decode("utf-8")
+            except UnicodeEncodeError:
+                pass
+        if y is None:
             x, y = x
         else:
-            warnings.warn("postion must a tuple: text('%s', (%s, %s))" % (txt, x, y))
+            warnings.warn("position must a tuple: text('%s', (%s, %s))" % (txt, x, y))
         attrString = self._dummyContext.attributedString(txt)
         w, h = attrString.size()
         setter = CoreText.CTFramesetterCreateWithAttributedString(attrString)
@@ -838,7 +1009,7 @@ class DrawBotDrawingTool(object):
         """
         Draw a text in a provided rectangle.
         Optionally an alignment can be set.
-        Possible `align` values are: `"left"`, `"center"` and `"right"`.
+        Possible `align` values are: `"left"`, `"center"`, `"right"` and `"justified"`.
 
         If the text overflows the rectangle, the overflowed text is returned.
 
@@ -846,10 +1017,16 @@ class DrawBotDrawingTool(object):
 
         .. showcode:: /../examples/textBox.py
         """
+        if isinstance(txt, (str, unicode)):
+            try:
+                txt = txt.decode("utf-8")
+            except UnicodeEncodeError:
+                pass
         if align is None:
             align = "left"
         elif align not in self._dummyContext._textAlignMap.keys():
-            raise DrawBotError, "align must be %s" % (", ".join(self._dummyContext._textAlignMap.keys()))
+            raise DrawBotError("align must be %s" % (", ".join(self._dummyContext._textAlignMap.keys())))
+        self._requiresNewFirstPage = True
         self._addInstruction("textBox", txt, (x, y, w, h), align)
         return self._dummyContext.clippedText(txt, (x, y, w, h), align)
 
@@ -863,148 +1040,23 @@ class DrawBotDrawingTool(object):
         """
         Return a string object that can handle text formatting.
 
-        This is a reusable object, if you want to draw the same over and over again.
-        FormattedString objects can be drawn with the `text(txt, (x, y))` and `textBox(txt, (x, y, w, h))` methods.
-
-        **FormattedString methods**
-
-        .. function:: formattedString.append(txt, font=None, fontSize=None, fill=None, cmykFill=None, stroke=None, cmykStroke=None, strokeWidth=None, align=None, lineHeight=None)
-
-            Add `txt` to the formatted string with some additional formatting attributes for the given text:
-
-            * `font`: the font to be used
-            * `fontSize`: the font size
-            * `fill`: the fill color
-            * `cmykFill`: the cmyk fill color
-            * `stroke`: the stroke color
-            * `cmykStroke`: the cmyk stroke color
-            * `strokeWidth`: the stroke width
-            * `align`: the alignment of the text
-            * `lineHeight`: the line height
-            * `openTypeFeatures`: enable OpenType features
-
-            All formatting attributes follow the same notation as other similar DrawBot methods.
-            A color is a tuple of `(r, g, b, alpha)` and a cmykColor is a tuple of `(c, m, y, k, alpha)`.
-
-            Text can also be added with `formattedString += "hello"`. This will append the text with the current settings of the formatted string.
-
-        .. function:: formattedString.font(fontName, fontSize=None)
-
-            Set a font with the name of the font.
-            Optionally a `fontSize` can be set directly.
-            The default font, also used as fallback font, is 'LucidaGrande'.
-            The default `fontSize` is 10pt.
-
-            The name of the font relates to the font's PostScript name.
-
-        .. function:: formattedString.fontSize(fontSize)
-
-            Set the font size in points.
-            The default `fontSize` is 10pt.
-
-        .. function:: formattedString.fallbackFont(fontName)
-
-            Set a fallback font, this is used whenever a glyph is not available in the current font.
-
-        .. function:: formattedString.fill(r, g, b, a)
-
-            Sets the fill color with a `red`, `green`, `blue` and `alpha` value.
-            Each argument must a value float between 0 and 1.
-
-        .. function:: formattedString.stroke(r, g, b, a)
-
-            Sets the stroke color with a `red`, `green`, `blue` and `alpha` value.
-            Each argument must a value float between 0 and 1.
-
-        .. function:: formattedString.cmykFill(c, m, y, k, a)
-
-            Set a fill using a CMYK color before drawing a shape. This is handy if the file is intended for print.
-
-            Sets the CMYK fill color. Each value must be a float between 0.0 and 1.0.
-
-        .. function:: formattedString.cmykStroke(c, m, y, k, a)
-
-            Set a stroke using a CMYK color before drawing a shape. This is handy if the file is intended for print.
-
-            Sets the CMYK stroke color. Each value must be a float between 0.0 and 1.0.
-
-        .. function:: formattedString.strokeWidth(value)
-
-            Sets the stroke width.
-
-        .. function:: formattedString.align(align)
-
-            Sets the text alignment.
-            Possible `align` values are: `left`, `center` and `right`.
-
-        .. function:: formattedString.lineHeight(value)
-
-            Set the line height.
-
-        .. function:: formattedString.tracking(value)
-
-            Set the tracking between characters.
-
-        .. function:: formattedString.openTypeFeatures(frac=True, case=True, ...)
-
-            Enable OpenType features.
-
-        .. showcode:: /../examples/openTypeFeaturesFromattedString.py
-
-        .. function:: formattedString.listOpenTypeFeatures(fontName=None)
-
-            List all OpenType feature tags for the current font.
-
-            Optionally a `fontName` can be given.
-
-        .. function:: formattedString.size()
-
-            Return the size of the string.
-
-        .. showcode:: /../examples/formattedString.py
-
-        .. function:: formattedString.fontAscender()
-
-            Returns the current font ascender, based on the current `font` and `fontSize`.
-
-        .. function:: formattedString.fontDescender()
-
-            Returns the current font descender, based on the current `font` and `fontSize`.
-
-        .. function:: formattedString.fontXHeight()
-
-            Returns the current font x-height, based on the current `font` and `fontSize`.
-
-        .. function:: formattedString.fontCapHeight()
-
-            Returns the current font cap height, based on the current `font` and `fontSize`.
-
-        .. function:: formattedString.fontLeading()
-
-            Returns the current font leading, based on the current `font` and `fontSize`.
-
-        .. function:: formattedString.fontLineHeight()
-
-            Returns the current line height, based on the current `font` and `fontSize`.
-            If a `lineHeight` is set, this value will be returned.
-
-        .. function:: formattedString.appendGlyph(glyphName1, glyphName2, ...)
-
-            Appends a glyph by his glyph name using the current `font`.
-
         .. showcode:: /../examples/appendGlyphFormattedString.py
-        
+
+        .. autoclass:: drawBot.context.baseContext.FormattedString
+            :members:
         """
         return self._formattedStringClass(*args, **kwargs)
 
     # images
 
-    def image(self, path, x, y=None, alpha=None):
+    def image(self, path, x, y=None, alpha=None, pageNumber=None):
         """
         Add an image from a `path` with an `offset` and an `alpha` value.
         This should accept most common file types like pdf, jpg, png, tiff and gif.
 
         Optionally an `alpha` can be provided, which is a value between 0 and 1.
+
+        Optionally a `pageNumber` can be provided when the path referes to a multi page pdf file.
 
         .. showcode:: /../examples/image.py
         """
@@ -1017,28 +1069,56 @@ class DrawBotDrawingTool(object):
 
         if alpha is None:
             alpha = 1
+        if isinstance(path, self._imageClass):
+            path = path._nsImage()
         if isinstance(path, (str, unicode)):
             path = optimizePath(path)
-        self._addInstruction("image", path, (x, y), alpha)
+        self._requiresNewFirstPage = True
+        self._addInstruction("image", path, (x, y), alpha, pageNumber)
 
-    def imageSize(self, path):
+    def imageSize(self, path, pageNumber=None):
         """
         Return the `width` and `height` of an image.
 
         .. showcode:: /../examples/imageSize.py
         """
+        if isinstance(path, self._imageClass):
+            path = path._nsImage()
         if isinstance(path, AppKit.NSImage):
-            source = path
+            rep = path.TIFFRepresentation()
+            _isPDF = False
         else:
             if isinstance(path, (str, unicode)):
                 path = optimizePath(path)
             if path.startswith("http"):
                 url = AppKit.NSURL.URLWithString_(path)
             else:
+                if not os.path.exists(path):
+                    raise DrawBotError("Image does not exist")
                 url = AppKit.NSURL.fileURLWithPath_(path)
-            source = AppKit.NSImage.alloc().initByReferencingURL_(url)
-        w, h = source.size()
-        return int(w), int(h)
+            _isPDF, pdfDocument = isPDF(url)
+            # check if the file is an .eps
+            _isEPS, epsRep = isEPS(url)
+            # check if the file is an .gif
+            _isGIF, gifRep = isGIF(url)
+            if _isEPS:
+                _isPDF = True
+                rep = epsRep
+            elif _isGIF and pageNumber is not None:
+                rep = gifTools.gifFrameAtIndex(url, pageNumber-1)
+            elif _isPDF and pageNumber is not None:
+                page = pdfDocument.pageAtIndex_(pageNumber-1)
+                # this is probably not the fastest method...
+                rep = AppKit.NSImage.alloc().initWithData_(page.dataRepresentation())
+            else:
+                rep = AppKit.NSImageRep.imageRepWithContentsOfURL_(url)
+        if _isPDF:
+            w, h = rep.size()
+        elif _isGIF:
+            w, h = rep.size()
+        else:
+            w, h = rep.pixelsWide(), rep.pixelsHigh()
+        return w, h
 
     def imagePixelColor(self, path, (x, y)):
         """
@@ -1046,13 +1126,15 @@ class DrawBotDrawingTool(object):
 
         .. showcode:: /../examples/pixelColor.py
         """
+        if isinstance(path, (str, unicode)):
+            path = optimizePath(path)
         bitmap = _chachedPixelColorBitmaps.get(path)
         if bitmap is None:
-            if isinstance(path, AppKit.NSImage):
+            if isinstance(path, self._imageClass):
+                source = path._nsImage()
+            elif isinstance(path, AppKit.NSImage):
                 source = path
             else:
-                if isinstance(path, (str, unicode)):
-                    path = optimizePath(path)
                 if path.startswith("http"):
                     url = AppKit.NSURL.URLWithString_(path)
                 else:
@@ -1068,6 +1150,22 @@ class DrawBotDrawingTool(object):
         color = color.colorUsingColorSpaceName_("NSCalibratedRGBColorSpace")
         return color.redComponent(), color.greenComponent(), color.blueComponent(), color.alphaComponent()
 
+    def numberOfPages(self, path):
+        path = optimizePath(path)
+        if path.startswith("http"):
+            url = AppKit.NSURL.URLWithString_(path)
+        else:
+            url = AppKit.NSURL.fileURLWithPath_(path)
+        pdf = Quartz.CGPDFDocumentCreateWithURL(url)
+        if pdf:
+            return Quartz.CGPDFDocumentGetNumberOfPages(pdf)
+        _isGIF, _ = isGIF(url)
+        if _isGIF:
+            frameCount = gifTools.gifFrameCount(url)
+            if frameCount:
+                return frameCount
+        return None
+
     # mov
 
     def frameDuration(self, seconds):
@@ -1076,11 +1174,34 @@ class DrawBotDrawingTool(object):
 
         .. showcode:: /../examples/frameDuration.py
         """
+        self._requiresNewFirstPage = True
         self._addInstruction("frameDuration", seconds)
 
     def frameduration(self, seconds):
         _deprecatedWarningLowercase("frameDuration(%s)" % seconds)
         self.frameDuration(seconds)
+        
+        
+    # pdf links
+    
+    def linkDestination(self, name, x=None, y=None):
+        """
+        Add a destination point for a link within a PDF.
+        """
+        if x:
+            if len(x) == 2:
+                x, y = x
+            else: x, y = (None, None)
+        self._requiresNewFirstPage = True
+        self._addInstruction("linkDestination", name, (x, y))
+    
+    def linkRect(self, name, (x, y, w, h)):
+        """
+        Add a rect for a link within a PDF.
+        """
+        self._requiresNewFirstPage = True
+        self._addInstruction("linkRect", name, (x, y, w, h))
+        
 
     # helpers
 
@@ -1089,6 +1210,11 @@ class DrawBotDrawingTool(object):
         Returns the size of a text with the current settings,
         like `font`, `fontSize` and `lineHeight` as a tuple (width, height).
         """
+        if isinstance(txt, (str, unicode)):
+            try:
+                txt = txt.decode("utf-8")
+            except UnicodeEncodeError:
+                pass
         return self._dummyContext.textSize(txt, align)
 
     def textsize(self, txt, align=None):
@@ -1104,6 +1230,58 @@ class DrawBotDrawingTool(object):
     def installedfonts(self):
         _deprecatedWarningLowercase("installedFonts()")
         return self.installedFonts()
+
+    def installFont(self, path):
+        """
+        Install a font with a given path and the postscript font name will be returned.
+        The postscript font name can be used to set the font as the active font.
+
+        Fonts are installed only for the current process.
+        Fonts will not be accesible outside the scope of drawBot.
+
+        All installed fonts will automatically be uninstalled when the script is done.
+
+        .. showcode:: /../examples/installFont.py
+        """
+        if path in self._tempInstalledFonts:
+            return self._tempInstalledFonts[path]
+
+        success, error = self._dummyContext.installFont(path)
+        self._addInstruction("installFont", path)
+
+        psName = self._dummyContext._fontNameForPath(path)
+        self._tempInstalledFonts[path] = psName
+
+        if not success:
+            warnings.warn("install font: %s" % error)
+        return psName
+
+    def uninstallFont(self, path):
+        """
+        Uninstall a font with a given path.
+        """
+        success, error = self._dummyContext.uninstallFont(path)
+        if path in self._tempInstalledFonts:
+            del self._tempInstalledFonts[path]
+        if not success:
+            warnings.warn("uninstall font: %s" % error)
+        self._addInstruction("uninstallFont", path)
+
+    def _uninstallAllFonts(self):
+        for path in self._tempInstalledFonts:
+            self._dummyContext.uninstallFont(path)
+        self._tempInstalledFonts = dict()
+
+    def _tryInstallFontFromFontName(self, fontName):
+        # check if the fontName is actually a path
+        if os.path.exists(fontName):
+            fontPath = os.path.abspath(fontName)
+            ext = os.path.splitext(fontPath)[1]
+            if ext.lower() in [".otf", ".ttf", ".ttc"]:
+                fontName = self.installFont(fontPath)
+            else:
+                raise DrawBotError("Font '%s' is not .ttf, .otf or .ttc." % fontPath)
+        return fontName
 
     def fontAscender(self):
         """
@@ -1146,92 +1324,36 @@ class DrawBotDrawingTool(object):
 
     _bezierPathClass = BezierPath
 
-    def BezierPath(self):
+    def BezierPath(self, path=None, glyphSet=None):
         """
         Return a BezierPath object.
         This is a reusable object, if you want to draw the same over and over again.
 
-        **BezierPath methods**
-
-        .. function:: bezierPath.moveTo((x, y))
-
-            Move to a point `x`, `y`.
-
-        .. function:: bezierPath.lineTo((x, y))
-
-            Line to a point `x`, `y`.
-
-        .. function:: bezierPath.curveTo((x1, y1), (x2, y2), (x3, y3))
-
-            Curve to a point `x3`, `y3`.
-            With given bezier handles `x1`, `y1` and `x2`, `y2`.
-
-        .. function:: bezierPath.arcTo((x1, y1), (x2, y2), radius)
-
-            Arc from one point to an other point with a given `radius`
-
-        .. function:: bezierPath.closePath()
-
-            Close the path.
-
-        .. function:: bezierPath.rect(x, y, w, h)
-
-            Add a rectangle at possition `x`, `y` with a size of `w`, `h`
-
-        .. function:: bezierPath.oval(x, y, w, h)
-
-            Add a oval at possition `x`, `y` with a size of `w`, `h`
-
-        .. function:: bezierPath.text(txt, font=None, fontSize=10, offset=None, box=None)
-
-            Draws a `txt` with a `font` and `fontSize` at an `offset` in the bezier path.
-
-            Optionally `txt` can be a `FormattedString` and be drawn inside a `box`, a tuple of (x, y, width, height).
-
-        .. function:: bezierPath.pointInside((x, y))
-
-            Check if a point `x`, `y` is inside a path.
-
-        .. function:: bezierPath.bounds()
-
-            Return the bounding box of the path as `x`, `y`, `width`, `height`.
-
-        .. function:: bezierPath.controlPointBounds()
-
-            Return the bounding box of the path including the offcurve points as `x`, `y`, `width`, `height`.
-
-        .. function:: bezierPath.copy()
-
-            Copy the bezier path.
-
-
-        |
-
-        **BezierPath attributes**
-
-        .. attribute:: bezierPath.points
-
-            Return a list of all points.
-
-        .. attribute:: bezierPath.onCurvePoints
-
-            Return a list of all on-curve points.
-
-        .. attribute:: bezierPath.offCurvePoints
-
-            Return a list of all off-curve points.
-
-        .. attribute:: bezierPath.contours
-
-            Return a list of contours with all point coordinates sorted in segments.
-
         .. showcode:: /../examples/bezierPath.py
-        """
-        return self._bezierPathClass()
 
-    def Bezierpath(self):
+        .. autoclass:: drawBot.context.baseContext.BezierPath
+            :members:
+        """
+        return self._bezierPathClass(path, glyphSet)
+
+    def Bezierpath(self, path=None):
         _deprecatedWarningLowercase("BezierPath()")
         return self.BezierPath()
+
+    _imageClass = ImageObject
+
+    def ImageObject(self, path=None):
+        """
+        Return a Image object, packed with filters.
+        This is a reusable object.
+
+        .. showcode:: /../examples/imageObject.py
+
+        .. autoclass:: drawBot.context.tools.imageObject.ImageObject
+            :members:
+
+        """
+        return self._imageClass(path)
 
     def Variable(self, variables, workSpace):
         """
@@ -1246,12 +1368,10 @@ class DrawBotDrawingTool(object):
         .. showcode:: /../examples/variables.py
         """
 
-        documents = AppKit.NSApp().orderedDocuments()
-        if not documents:
-            raise DrawBotError, "There is no document open"
-        document = documents[0]
+        document = AppKit.NSDocumentController.sharedDocumentController().currentDocument()
+        if not document:
+            raise DrawBotError("There is no document open")
         controller = document.vanillaWindowController
-
         try:
             controller._variableController.buildUI(variables)
             controller._variableController.show()
